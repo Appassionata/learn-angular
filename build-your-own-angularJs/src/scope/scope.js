@@ -4,6 +4,7 @@ function Scope() {
     this.$$watchers = [];
     this.$$asynQueue = [];
     this.$$applyAsynQueue = [];
+    this.$$postDigestQueue = [];
     this.$$lastDirtyWatch = null;
     this.$$phase = null;
     this.$$applyAsyncId = null;
@@ -27,7 +28,7 @@ Scope.prototype.$digest = function () {
     var ttl = 10;
     this.$$lastDirtyWatch = null;
     this.$beginPhase('$digest');
-    if (this.$$applyAsyncId === null && this.$$applyAsynQueue.length) {
+    if (this.$$applyAsyncId !== null && this.$$applyAsynQueue.length) {
         clearTimeout(this.$$applyAsyncId);
         this.$$flashApplyAsync();
         this.$$applyAsyncId = null;
@@ -40,9 +41,15 @@ Scope.prototype.$digest = function () {
         dirty = this.$$digestOnce();
         if ((dirty || this.$$asynQueue.length) && !ttl--) {//如果在watchFn中添加任务，这里需要做一个限制，保证超过了ttl就退出
             this.$clearPhase();
-            throw ('10 digest iterations reached');
+            throw ttl + ' digest iterations reached';
         }
     } while (dirty || this.$$asynQueue.length);//前一轮还是有不同的生活或者还有需要执行任务的情况下，继续下一次轮询
+
+    while (this.$$postDigest.length) {
+        console.info(this.$$postDigestQueue.shift());
+        this.$eval(this.$$postDigestQueue.shift());
+    }
+
     this.$clearPhase();
 };
 
@@ -50,9 +57,9 @@ Scope.prototype.$$digestOnce = function () {
     var self = this;
     var newValue, oldValue, dirty;
     _.forEach(self.$$watchers, function (watcher) {
-        newValue = watcher.listenerFn(self);
+        newValue = watcher.watchFn(self);
         oldValue = watcher.last;
-        if (self.areEqual(newValue, oldValue, watcher.valueEq)) {
+        if (!self.areEqual(newValue, oldValue, watcher.valueEq)) {
             watcher.listenerFn(newValue, oldValue === initWatchVal ? newValue : oldValue, self);
             watcher.last = watcher.valueEq ? _.cloneDeep(newValue) : newValue;
             self.$$lastDirtyWatch = watcher;
@@ -111,12 +118,14 @@ Scope.prototype.$applyAsync = function (expr) {
     //需要一个队列来缓存代码
     self.$$applyAsynQueue.push(expr);
     //标识是否有定时器
-    self.$$applyAsyncId = setTimeout(function () {
-        self.$apply(function () {
-            self.$$flashApplyAsync();
+    if (self.$$applyAsyncId === null) {
+        self.$$applyAsyncId = setTimeout(function () {
+            self.$apply(function () {
+                self.$$flashApplyAsync();
+            });
+            self.$$applyAsyncId = null;
         });
-        self.$$applyAsyncId = null;
-    });
+    }
 };
 
 Scope.prototype.$$flashApplyAsync = function () {
@@ -134,4 +143,8 @@ Scope.prototype.$beginPhase = function (phase) {
 
 Scope.prototype.$clearPhase = function () {
     this.$$phase = null;
+};
+
+Scope.prototype.$$postDigest = function (expr) {
+    this.$$postDigestQueue.push(expr);
 };
