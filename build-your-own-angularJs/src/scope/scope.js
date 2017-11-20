@@ -10,6 +10,8 @@ function Scope() {
     this.$$applyAsyncId = null;
 }
 
+var exceptionHandler = console.error;
+
 function initWatchVal() {}
 
 Scope.prototype.$watch = function (watchFn, listenerFn, valueEq) {
@@ -19,8 +21,31 @@ Scope.prototype.$watch = function (watchFn, listenerFn, valueEq) {
         last: initWatchVal,
         valueEq: !!valueEq
     };
-    this.$$watchers.push(watcher);
-    this.$$lastDirtyWatch = null;
+    var self = this;
+    /*
+      * 这里使用unshift，遍历的时候使用forEachRight是为了防止出现在watchFn
+      * 或者listener中销毁了watcher（无论是本次的还是其他的）
+      *
+      * 如果使用push和forEach的情况下，删除本次或本次以前的元素会导致遍历的
+      * 下一个元素其实是下下个元素(index+2)，可能会少遍历一个元素，并且最后
+      * 肯定会读取array[length]，导致最后一个元素undefined
+      *
+      * 如果使用unshift和forEachRight
+      * 删除了本次或本次后的元素不影响便利，删除了本次前的元素会导致下一次遍历
+      * 的还是本次元素因此，如果删除前遍历本次元素dirty，删除后遍历本次元素not
+      * dirty，会被短路，因此删除后需要吧$$lastDirtyWatch清除
+      *
+    */
+    self.$$watchers.unshift(watcher);
+    //如果在listener中再次加入watcher，下一次遍历会被短路，因此需要重置$$lastDirtyWatch
+    self.$$lastDirtyWatch = null;
+    return function () {
+        var index = self.$$watchers.indexOf(watcher);
+        if (index > -1) {
+            self.$$watchers.splice(index, 1);
+            self.$$lastDirtyWatch = null;
+        }
+    };
 };
 
 Scope.prototype.$digest = function () {
@@ -30,13 +55,17 @@ Scope.prototype.$digest = function () {
     this.$beginPhase('$digest');
     if (this.$$applyAsyncId !== null && this.$$applyAsynQueue.length) {
         clearTimeout(this.$$applyAsyncId);
-        this.$$flashApplyAsync();
+        this.$$flushApplyAsync();
         this.$$applyAsyncId = null;
     }
     do {
         while (this.$$asynQueue.length) {
-            var asyncTask = this.$$asynQueue.shift();
-            asyncTask.scope.$eval(asyncTask.expression);
+            try {
+                var asyncTask = this.$$asynQueue.shift();
+                asyncTask.scope.$eval(asyncTask.expression);
+            } catch (e) {
+                exceptionHandler(e);
+            }
         }
         dirty = this.$$digestOnce();
         if ((dirty || this.$$asynQueue.length) && !ttl--) {//如果在watchFn中添加任务，这里需要做一个限制，保证超过了ttl就退出
@@ -45,9 +74,12 @@ Scope.prototype.$digest = function () {
         }
     } while (dirty || this.$$asynQueue.length);//前一轮还是有不同的生活或者还有需要执行任务的情况下，继续下一次轮询
 
-    while (this.$$postDigest.length) {
-        console.info(this.$$postDigestQueue.shift());
-        this.$eval(this.$$postDigestQueue.shift());
+    while (this.$$postDigestQueue.length) {
+        try {
+            this.$eval(this.$$postDigestQueue.shift());
+        } catch (e) {
+            exceptionHandler(e);
+        }
     }
 
     this.$clearPhase();
@@ -56,16 +88,24 @@ Scope.prototype.$digest = function () {
 Scope.prototype.$$digestOnce = function () {
     var self = this;
     var newValue, oldValue, dirty;
-    _.forEach(self.$$watchers, function (watcher) {
-        newValue = watcher.watchFn(self);
-        oldValue = watcher.last;
-        if (!self.areEqual(newValue, oldValue, watcher.valueEq)) {
-            watcher.listenerFn(newValue, oldValue === initWatchVal ? newValue : oldValue, self);
-            watcher.last = watcher.valueEq ? _.cloneDeep(newValue) : newValue;
-            self.$$lastDirtyWatch = watcher;
-            dirty = true;
-        } else if (self.$$lastDirtyWatch === watcher) {
-            return false;
+    _.forEachRight(self.$$watchers, function (watcher) {
+        if (!watcher) {
+            return;
+        }
+        try {
+            newValue = watcher.watchFn(self);
+            oldValue = watcher.last;
+            if (!self.areEqual(newValue, oldValue, watcher.valueEq)) {
+                //这里需要先放上来，下面可能出现listener中清楚的情况
+                self.$$lastDirtyWatch = watcher;
+                watcher.listenerFn(newValue, oldValue === initWatchVal ? newValue : oldValue, self);
+                watcher.last = watcher.valueEq ? _.cloneDeep(newValue) : newValue;
+                dirty = true;
+            } else if (self.$$lastDirtyWatch === watcher) {
+                return false;
+            }
+        } catch (e) {
+            exceptionHandler(e);
         }
     });
     return dirty;
@@ -121,16 +161,20 @@ Scope.prototype.$applyAsync = function (expr) {
     if (self.$$applyAsyncId === null) {
         self.$$applyAsyncId = setTimeout(function () {
             self.$apply(function () {
-                self.$$flashApplyAsync();
+                self.$$flushApplyAsync();
             });
             self.$$applyAsyncId = null;
         });
     }
 };
 
-Scope.prototype.$$flashApplyAsync = function () {
+Scope.prototype.$$flushApplyAsync = function () {
     while (this.$$applyAsynQueue.length) {
-        this.$eval(this.$$applyAsynQueue.shift());
+        try {
+            this.$eval(this.$$applyAsynQueue.shift());
+        } catch (e) {
+            exceptionHandler(e);
+        }
     }
 };
 
@@ -147,4 +191,23 @@ Scope.prototype.$clearPhase = function () {
 
 Scope.prototype.$$postDigest = function (expr) {
     this.$$postDigestQueue.push(expr);
+};
+
+Scope.prototype.$watchGroup = function (watchFns, listenerFn) {
+    var self = this;
+    var newValues = new Array(watchFns.length);
+    var oldValues = new Array(watchFns.length);
+    var changeReactionScheduled  = false;
+    _.forEach(watchFns, function (watchFn, i) {
+        self.$watch(watchFn, function (newValue, oldValue) {
+            newValues[i] = newValue;
+            oldValues[i] = oldValue;
+            if (!changeReactionScheduled) {
+                changeReactionScheduled = true;
+                listenerFn(newValues, oldValues, self);
+            }
+        });
+
+    });
+
 };

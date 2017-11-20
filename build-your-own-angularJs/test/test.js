@@ -19,12 +19,14 @@ function expect(x) {
 
 var scope = new Scope();
 
-scope.counter = 0;
-scope.$$postDigest(function() {
-    scope.counter++;
+var counter = 0;
+scope.aValue = 1;
+scope.anotherValue = 2;
+scope.$watchGroup([
+    function(scope) { return scope.aValue; },
+    function(scope) { return scope.anotherValue; }
+], function(newValues, oldValues, scope) {
+    counter++;
 });
-expect(scope.counter).toBe(0);
 scope.$digest();
-expect(scope.counter).toBe(1);
-scope.$digest();
-expect(scope.counter).toBe(1);
+expect(counter).toEqual(1);
