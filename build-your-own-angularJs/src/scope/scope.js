@@ -72,7 +72,7 @@ Scope.prototype.$digest = function () {
             this.$clearPhase();
             throw ttl + ' digest iterations reached';
         }
-    } while (dirty || this.$$asynQueue.length);//前一轮还是有不同的生活或者还有需要执行任务的情况下，继续下一次轮询
+    } while (dirty || this.$$asynQueue.length);//前一轮还是有不同的时候或者还有需要执行任务的情况下，继续下一次轮询
 
     while (this.$$postDigestQueue.length) {
         try {
@@ -198,16 +198,50 @@ Scope.prototype.$watchGroup = function (watchFns, listenerFn) {
     var newValues = new Array(watchFns.length);
     var oldValues = new Array(watchFns.length);
     var changeReactionScheduled  = false;
-    _.forEach(watchFns, function (watchFn, i) {
-        self.$watch(watchFn, function (newValue, oldValue) {
+    var firstRun = true;
+
+    if (!watchFns.length) {
+        var hasDestroy = false;
+        //angularJs会执行一次，这里按照实现写
+        this.$evalAsync(function () {
+            //firstRun
+            if (hasDestroy) {
+                return;
+            }
+            listenerFn(newValues, newValues, self);
+        });
+        //如果在$digest之前destroy，那么listener就不会运行
+        return function () {
+            hasDestroy = true;
+        };
+    }
+
+    var destroyFns = _.map(watchFns, function (watchFn, i) {
+        return self.$watch(watchFn, function (newValue, oldValue) {
             newValues[i] = newValue;
             oldValues[i] = oldValue;
             if (!changeReactionScheduled) {
+                //这一次$digestOnce最多运行一次listenerFn
                 changeReactionScheduled = true;
-                listenerFn(newValues, oldValues, self);
+                self.$evalAsync(function () {
+                    //执行之后再放开，保证下一次change的时候还能继续运行listenerFn
+                    changeReactionScheduled = false;
+                    //如果第一次运行的时候(init的时候)，可以保证newValues === oldValues
+                    if (firstRun) {
+                        firstRun = false;
+                        listenerFn(newValues, newValues, self);
+                    } else {
+                        listenerFn(newValues, newValues, self);
+                    }
+                });
             }
         });
-
     });
+
+    return function () {
+        _.forEach(destroyFns, function (destroyFn) {
+            destroyFn();
+        })
+    };
 
 };

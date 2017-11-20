@@ -20,13 +20,9 @@ function expect(x) {
 var scope = new Scope();
 
 var counter = 0;
-scope.aValue = 1;
-scope.anotherValue = 2;
-scope.$watchGroup([
-    function(scope) { return scope.aValue; },
-    function(scope) { return scope.anotherValue; }
-], function(newValues, oldValues, scope) {
+var destroyGroup = scope.$watchGroup([], function(newValues, oldValues, scope) {
     counter++;
 });
+destroyGroup();
 scope.$digest();
-expect(counter).toEqual(1);
+expect(counter).toEqual(0);
