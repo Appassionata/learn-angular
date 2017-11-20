@@ -5,6 +5,7 @@ function Scope() {
     this.$$asynQueue = [];
     this.$$applyAsynQueue = [];
     this.$$postDigestQueue = [];
+    this.$$children = [];
     this.$$lastDirtyWatch = null;
     this.$$phase = null;
     this.$$applyAsyncId = null;
@@ -244,4 +245,26 @@ Scope.prototype.$watchGroup = function (watchFns, listenerFn) {
         })
     };
 
+};
+
+Scope.prototype.$new = function () {
+    var child = Object.create(this);
+    child.$$watchers = [];
+    child.$$children = [];
+    this.$$children.push(child);
+    return child;
+    //orElse
+    // var ChildScope = function () {  };
+    // ChildScope.prototype = this;
+    // return new ChildScope();
+};
+
+Scope.prototype.$$everyScope = function (fn) {
+    if (fn(this)) {
+        return this.$$children.every(function (child) {
+            return child.$$everyScope(fn);
+        });
+    } else {
+        return false;
+    }
 };

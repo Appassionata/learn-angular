@@ -13,16 +13,21 @@ function expect(x) {
         },
         toEqual: function (y) {
             console.info(x === y);
+        },
+        toBeUndefined: function () {
+            console.info(x === undefined);
         }
     }
 }
 
-var scope = new Scope();
-
-var counter = 0;
-var destroyGroup = scope.$watchGroup([], function(newValues, oldValues, scope) {
-    counter++;
-});
-destroyGroup();
-scope.$digest();
-expect(counter).toEqual(0);
+var parent = new Scope();
+var child = parent.$new();
+parent.aValue = 'abc';
+child.$watch(
+    function(scope) { return scope.aValue; },
+    function(newValue, oldValue, scope) {
+        scope.aValueWas = newValue;
+    }
+);
+parent.$digest();
+expect(child.aValueWas).toBe('abc');
