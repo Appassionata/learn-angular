@@ -9,6 +9,7 @@ function Scope() {
     this.$$lastDirtyWatch = null;
     this.$$phase = null;
     this.$$applyAsyncId = null;
+    this.$root = this;
 }
 
 var exceptionHandler = console.error;
@@ -39,12 +40,12 @@ Scope.prototype.$watch = function (watchFn, listenerFn, valueEq) {
     */
     self.$$watchers.unshift(watcher);
     //如果在listener中再次加入watcher，下一次遍历会被短路，因此需要重置$$lastDirtyWatch
-    self.$$lastDirtyWatch = null;
+    self.$root.$$lastDirtyWatch = null;
     return function () {
         var index = self.$$watchers.indexOf(watcher);
         if (index > -1) {
             self.$$watchers.splice(index, 1);
-            self.$$lastDirtyWatch = null;
+            self.$root.$$lastDirtyWatch = null;
         }
     };
 };
@@ -52,12 +53,12 @@ Scope.prototype.$watch = function (watchFn, listenerFn, valueEq) {
 Scope.prototype.$digest = function () {
     var dirty;
     var ttl = 10;
-    this.$$lastDirtyWatch = null;
+    this.$root.$$lastDirtyWatch = null;
     this.$beginPhase('$digest');
-    if (this.$$applyAsyncId !== null && this.$$applyAsynQueue.length) {
-        clearTimeout(this.$$applyAsyncId);
+    if (this.$root.$$applyAsyncId !== null && this.$$applyAsynQueue.length) {
+        clearTimeout(this.$root.$$applyAsyncId);
         this.$$flushApplyAsync();
-        this.$$applyAsyncId = null;
+        this.$root.$$applyAsyncId = null;
     }
     do {
         while (this.$$asynQueue.length) {
@@ -88,26 +89,35 @@ Scope.prototype.$digest = function () {
 
 Scope.prototype.$$digestOnce = function () {
     var self = this;
-    var newValue, oldValue, dirty;
-    _.forEachRight(self.$$watchers, function (watcher) {
-        if (!watcher) {
-            return;
-        }
-        try {
-            newValue = watcher.watchFn(self);
-            oldValue = watcher.last;
-            if (!self.areEqual(newValue, oldValue, watcher.valueEq)) {
-                //这里需要先放上来，下面可能出现listener中清楚的情况
-                self.$$lastDirtyWatch = watcher;
-                watcher.listenerFn(newValue, oldValue === initWatchVal ? newValue : oldValue, self);
-                watcher.last = watcher.valueEq ? _.cloneDeep(newValue) : newValue;
-                dirty = true;
-            } else if (self.$$lastDirtyWatch === watcher) {
-                return false;
+    var continueLoop = true;
+    var dirty;
+    //遍历当前Scope的$$watchers，紧接着遍历子Scope的$$watchers，dirty需要再次遍历，clean或者遍历到$$lastDirtyWatch就退出
+    self.$$everyScope(function (scope) {
+        var newValue, oldValue;
+        _.forEachRight(scope.$$watchers, function (watcher) {
+            if (!watcher) {
+                return true;
             }
-        } catch (e) {
-            exceptionHandler(e);
-        }
+            try {
+                newValue = watcher.watchFn(scope);
+                oldValue = watcher.last;
+                if (!scope.areEqual(newValue, oldValue, watcher.valueEq)) {
+                    //这里需要先放上来，下面可能出现listener中清楚的情况
+                    //$$lastDirtyWatch需要挂在this（调用者）上
+                    self.$root.$$lastDirtyWatch = watcher;
+                    watcher.listenerFn(newValue, oldValue === initWatchVal ? newValue : oldValue, scope);
+                    watcher.last = watcher.valueEq ? _.cloneDeep(newValue) : newValue;
+                    dirty = true;
+                    return true;
+                } else if (self.$root.$$lastDirtyWatch === watcher) {
+                    continueLoop = false;
+                    return false;
+                }
+            } catch (e) {
+                exceptionHandler(e);
+            }
+        });
+        return continueLoop;
     });
     return dirty;
 };
@@ -131,7 +141,7 @@ Scope.prototype.$apply = function (expr) {
         return this.$eval(expr);
     } finally {
         this.$clearPhase();
-        this.$digest();
+        this.$root.$digest();
     }
 };
 
@@ -144,7 +154,7 @@ Scope.prototype.$evalAsync = function (expr) {
             //如果没有任务，则不需要$digest，保证尽量少执行多余的$digest
             //可能出现调用了$evalAsync后同步执行的代码中已经调用了$digest，那么异步队列则被清空
             if (self.$$asynQueue.length) {
-                self.$digest();
+                self.$root.$digest();
             }
         });
     }
@@ -159,12 +169,12 @@ Scope.prototype.$applyAsync = function (expr) {
     //需要一个队列来缓存代码
     self.$$applyAsynQueue.push(expr);
     //标识是否有定时器
-    if (self.$$applyAsyncId === null) {
-        self.$$applyAsyncId = setTimeout(function () {
+    if (self.$root.$$applyAsyncId === null) {
+        self.$root.$$applyAsyncId = setTimeout(function () {
             self.$apply(function () {
                 self.$$flushApplyAsync();
             });
-            self.$$applyAsyncId = null;
+            self.$root.$$applyAsyncId = null;
         });
     }
 };
@@ -247,11 +257,26 @@ Scope.prototype.$watchGroup = function (watchFns, listenerFn) {
 
 };
 
-Scope.prototype.$new = function () {
-    var child = Object.create(this);
+Scope.prototype.$new = function (isolated, parent) {
+    var child;
+    //这应该会在指令的transclusion会用到
+    parent = parent || this;
+    if (isolated) {
+        child = new Scope();
+        //指向最初的$rootScope
+        child.$root = parent.$root;
+        child.$$asynQueue = parent.$$asynQueue;
+        child.$$applyAsynQueue = parent.$$applyAsynQueue;
+        child.$$postDigestQueue = parent.$$postDigestQueue;
+    } else {
+        //还是继承this
+        child = Object.create(this);
+    }
     child.$$watchers = [];
     child.$$children = [];
-    this.$$children.push(child);
+    child.$parent = parent;
+    //放在指定的parent.$$children里面，使得parent $digest的时候会遍历到child对象
+    parent.$$children.push(child);
     return child;
     //orElse
     // var ChildScope = function () {  };
@@ -264,7 +289,30 @@ Scope.prototype.$$everyScope = function (fn) {
         return this.$$children.every(function (child) {
             return child.$$everyScope(fn);
         });
-    } else {
-        return false;
     }
+    return false;
+};
+
+Scope.prototype.$destroy = function () {
+    if (!this.$parent) {
+        //$rootScope
+        return;
+    }
+    var siblings = this.$parent.$$children;
+    var index = siblings.indexOf(this);
+    if (index > -1) {
+        siblings.splice(index, 1);
+    }
+    //GC
+    this.$$watchers = null;
+};
+
+Scope.prototype.$watchCollections = function (watchFn, listenerFn) {
+    function internalWatchFn() {
+
+    }
+    function internalListenerFn() {
+
+    }
+    return this.$watch(internalWatchFn, internalListenerFn);
 };
